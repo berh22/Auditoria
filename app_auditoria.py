@@ -39,9 +39,24 @@ def convertir_fecha_sql(val):
     if pd.isna(val) or str(val).strip() in ["", "NONE", "NAN", "<NAT>", "00/00/0000"]:
         return None
     try:
-        return str(pd.to_datetime(val, errors='coerce').date())
+        dt = pd.to_datetime(val, errors='coerce')
+        if pd.notna(dt) and dt is not pd.NaT:
+            return str(dt.date())
+        return None
     except:
         return None
+
+def formatear_fecha_visor(val):
+    """Convierte cualquier formato de fecha de la DB a DD/MM/AAAA de forma ultra-segura (Anti-Crash)"""
+    if pd.isna(val) or str(val).strip() in ["", "NONE", "NAN", "<NAT>", "00/00/0000"]:
+        return ""
+    try:
+        dt = pd.to_datetime(val, errors='coerce')
+        if pd.notna(dt) and dt is not pd.NaT:
+            return dt.strftime('%d/%m/%Y')
+        return str(val).strip()
+    except:
+        return str(val).strip()
 
 def cargar_desde_sql(supabase_client) -> pd.DataFrame:
     if supabase_client is None: return pd.DataFrame(columns=list(DB_MAP.keys()))
@@ -223,7 +238,7 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                 if header_idx is not None:
                     df_temp = df_raw.iloc[header_idx+1:].copy()
                     
-                    # 🔥 ESCUDO ANTI-DUPLICADOS (CORREGIDO Y RESTAURADO): Resuelve el error de PyArrow
+                    # 🔥 ESCUDO ANTI-DUPLICADOS: Resuelve el error de PyArrow
                     encabezados_crudos = [str(c).strip().upper() for c in df_raw.iloc[header_idx].values]
                     encabezados_unicos = []
                     conteos = {}
@@ -299,7 +314,7 @@ if opcion == "📥 Alimentar / Capturar Cheques":
             
             c7, c8 = st.columns(2)
             concepto_m = c7.selectbox("Concepto del Cheque:", [
-                "1. COMPROBACIÓN DE GASTOS", "2. FINIQUITO", "3. ABONO A FINANERA", 
+                "1. COMPROBACIÓN DE GASTOS", "2. FINIQUITO", "3. ABONO A FINANCIERA", 
                 "4. APERTURA DE FONDO FIJO", "5. PAGO DE NÓMINA", "6. GASTO POR COMPROBAR", 
                 "7. APOYO POR DEFUNCIÓN", "8. GRATIFICACIONES", "9. PENSIÓN ALIMENTICIA", 
                 "10. RETENCION A PROVEEDOR", "11. PAGO DE TRÁMITES", "12. OTRO MOTIVO"
@@ -356,13 +371,14 @@ if opcion == "📥 Alimentar / Capturar Cheques":
             excel_binario = generar_excel_coloreado(st.session_state["MASTER_CHEQUES"])
             st.download_button(label="📥 Descargar Excel con Colores de Alerta", data=excel_binario, file_name="Auditoria_SQL_Color.xlsx")
 
-    # VISOR DE MAPA DE CALOR
+    # 🔥 VISOR DE MAPA DE CALOR CON ESCUDO ANTI-CRASH DE FECHAS ACTIVO
     st.markdown("---")
     st.subheader("👁️ Visor Forense General (Base de Datos Real en la Nube)")
     if not st.session_state["MASTER_CHEQUES"].empty:
         df_visor = st.session_state["MASTER_CHEQUES"].copy().sort_values(by="FOLIO", ascending=True)
         for col_f in ["FECHA DE EMISIÓN", "FECHA DE COBRO", "FECHA DE BAJA"]:
-            df_visor[col_f] = df_visor[col_f].apply(lambda x: pd.to_datetime(x).strftime('%d/%m/%Y') if pd.notna(x) and str(x).strip() != "" else "")
+            if col_f in df_visor.columns:
+                df_visor[col_f] = df_visor[col_f].apply(formatear_fecha_visor)
         st.dataframe(df_visor.style.apply(colorear_reglas_auditoria, axis=1), width='stretch')
 
 # ==========================================
