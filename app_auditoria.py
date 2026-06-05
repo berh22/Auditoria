@@ -52,7 +52,7 @@ def formatear_fecha_visor(val):
         return ""
     val_str = str(val).strip().upper()
     if "PENDIENTE" in val_str:
-        return str(val).strip().upper() # Preservamos el texto visualmente para comodidad del usuario
+        return str(val).strip().upper()
     try:
         dt = pd.to_datetime(val, errors='coerce')
         if pd.notna(dt) and dt is not pd.NaT:
@@ -75,20 +75,33 @@ def cargar_desde_sql(supabase_client) -> pd.DataFrame:
         return pd.DataFrame(columns=list(DB_MAP.keys()))
 
 def guardar_en_sql(supabase_client, df_datos):
-    if supabase_client is None or df_datos.empty: return
+    """Sincroniza datos regresando True si tuvo éxito o False si falló (Evita sobreescritura ciega)"""
+    if supabase_client is None: 
+        st.error("⚠️ El cliente de conexión SQL no está listo.")
+        return False
+    if df_datos.empty: 
+        return True
     try:
         df_sql = df_datos.rename(columns=DB_MAP)
         df_sql = df_sql.replace({np.nan: None, pd.NaT: None, "": None})
         
-        # Filtro purificador de fechas antes de tocar el motor SQL
+        # 🔥 BLINDAJE DE TIPOS CRÍTICOS ANTES DE ENVIAR A SQL
+        if "folio" in df_sql.columns:
+            df_sql["folio"] = pd.to_numeric(df_sql["folio"], errors='coerce').fillna(0).astype(int)
+        if "monto" in df_sql.columns:
+            df_sql["monto"] = pd.to_numeric(df_sql["monto"], errors='coerce').fillna(0).astype(float)
+            
+        # Filtro purificador de fechas
         for col_f in ["fecha_emision", "fecha_cobro", "fecha_de_baja"]:
             if col_f in df_sql.columns:
                 df_sql[col_f] = df_sql[col_f].apply(convertir_fecha_sql)
         
         records = df_sql.to_dict(orient="records")
         supabase_client.table("cheques").upsert(records).execute()
+        return True
     except Exception as e:
-        st.error(f"❌ Error en la sincronización transaccional SQL: {e}")
+        st.error(f"❌ ERROR CRÍTICO DE RECHAZO EN SUPABASE: {e}")
+        return False
 
 # ==========================================
 # CAPA INTERMEDIA: EL ESCUDO LIMPIADOR (PANDAS)
@@ -108,7 +121,7 @@ def limpiar_y_convertir_monto_positivo(df, columna):
     return df
 
 # ==========================================
-# MAPA DE COLORES Y EXPORTACIÓN V5 (DETECTOR FLEXIBLE)
+# MAPA DE COLORES Y EXPORTACIÓN
 # ==========================================
 def colorear_reglas_auditoria(row):
     estilo = [''] * len(row)
@@ -119,15 +132,12 @@ def colorear_reglas_auditoria(row):
     justificante = str(row.get('EVIDENCIA_CANCELADO', '')).strip()
     f_emision = pd.to_datetime(row.get('FECHA DE EMISIÓN'), errors='coerce')
     
-    # 🔥 DETECTOR INTELIGENTE DE TRÁNSITOS: Captura vacíos, nulos y la palabra "PENDIENTE"
     f_cobro_str = str(row.get('FECHA DE COBRO', '')).strip().upper()
     es_pendiente_cobro = f_cobro_str == "" or "PENDIENTE" in f_cobro_str or f_cobro_str in ["NAN", "NONE", "<NAT>", "00/00/0000"]
     
     if "GRATIFICACI" in concepto: return ['background-color: #ffcccc; color: #cc0000; font-weight: bold'] * len(row)
     if estatus == "CANCELADO" and (justificante == "" or "PENDIENTE" in justificante): return ['background-color: #fce5cd; color: #b45f06'] * len(row)
     if ("NO" == sello or "SIN SELLO" in sello) and (vale == "" or "PENDIENTE" in vale) and estatus != "CANCELADO": return ['background-color: #fff2cc; color: #856404'] * len(row)
-    
-    # 🔵 Aplicar Alerta Azul considerando la nueva regla flexible de pendientes
     if estatus != "CANCELADO" and pd.notna(f_emision) and es_pendiente_cobro:
         if (datetime.now() - f_emision).days > 7: return ['background-color: #e6f2ff; color: #0b5394'] * len(row)
     return estilo
@@ -148,7 +158,6 @@ def generar_excel_coloreado(df):
         vale, justificante = str(row.get('EVIDENCIA_VALE','')).strip(), str(row.get('EVIDENCIA_CANCELADO','')).strip()
         f_emision = pd.to_datetime(row.get('FECHA DE EMISIÓN'), errors='coerce')
         
-        # Sincronizar regla flexible también en la exportación física a Excel
         f_cobro_str = str(row.get('FECHA DE COBRO', '')).strip().upper()
         es_pendiente_cobro = f_cobro_str == "" or "PENDIENTE" in f_cobro_str or f_cobro_str in ["NAN", "NONE", "<NAT>", "00/00/0000"]
         
@@ -205,7 +214,6 @@ if opcion == "📥 Alimentar / Capturar Cheques":
         st.subheader("Modificación de Celdas en Tiempo Real")
         if not st.session_state["MASTER_CHEQUES"].empty:
             df_m = st.session_state["MASTER_CHEQUES"].copy()
-            # Dejar pasar textos especiales en fecha_cobro para el editor interactivo
             for col_f in ["FECHA DE EMISIÓN", "FECHA DE BAJA"]:
                 df_m[col_f] = pd.to_datetime(df_m[col_f], errors='coerce')
             df_m = df_m.sort_values(by="FOLIO", ascending=True)
@@ -227,10 +235,11 @@ if opcion == "📥 Alimentar / Capturar Cheques":
             if st.button("💾 Sincronizar Cambios con la Base de Datos SQL"):
                 with st.spinner("Actualizando registros en el servidor..."):
                     df_final = forzar_mayusculas_y_limpieza(df_editado)
-                    guardar_en_sql(db_client, df_final)
-                    st.session_state["MASTER_CHEQUES"] = df_final
-                    st.success("¡Base de datos SQL actualizada correctamente!")
-                    st.rerun()
+                    # 🚀 CAMBIO: Si sale bien actualiza el estado y recarga, si no, se frena para ver el error
+                    if guardar_en_sql(db_client, df_final):
+                        st.session_state["MASTER_CHEQUES"] = df_final
+                        st.success("¡Base de datos SQL actualizada correctamente!")
+                        st.rerun()
         else: st.info("No hay registros en la base de datos.")
 
     with tab_carga:
@@ -306,10 +315,12 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                             df_temp = forzar_mayusculas_y_limpieza(df_temp)
                             
                             df_unificado = pd.concat([st.session_state["MASTER_CHEQUES"], df_temp], ignore_index=True).drop_duplicates(subset=["EMPRESA", "FOLIO"], keep="last")
-                            guardar_en_sql(db_client, df_unificado)
-                            st.session_state["MASTER_CHEQUES"] = df_unificado
-                            st.success("¡Datos absorbidos e integrados permanentemente en SQL!")
-                            st.rerun()
+                            
+                            # 🚀 CAMBIO: Detener recarga automática si Supabase rechaza los datos
+                            if guardar_en_sql(db_client, df_unificado):
+                                st.session_state["MASTER_CHEQUES"] = df_unificado
+                                st.success("¡Datos absorbidos e integrados permanentemente en SQL!")
+                                st.rerun()
 
     with tab_manual:
         st.subheader("Captura Manual de un Cheque Individual")
@@ -324,18 +335,11 @@ if opcion == "📥 Alimentar / Capturar Cheques":
             benef_m = c5.text_input("Beneficiario:")
             sello_m = c6.selectbox("¿Cuenta con Sello 'Abono en Cuenta'?", ["SI", "NO", "NO APLICA"])
             
-            c7, c8 = st.columns(2)
-            concepto_m = c7.selectbox("Concepto del Cheque:", [
-                "1. COMPROBACIÓN DE GASTOS", "2. FINIQUITO", "3. ABONO A FINANCIERA", 
-                "4. APERTURA DE FONDO FIJO", "5. PAGO DE NÓMINA", "6. GASTO POR COMPROBAR", 
-                "7. APOYO POR DEFUNCIÓN", "8. GRATIFICACIONES", "9. PENSIÓN ALIMENTICIA", 
-                "10. RETENCION A PROVEEDOR", "11. PAGO DE TRÁMITES", "12. OTRO MOTIVO"
-            ])
-            estatus_m = c8.selectbox("Estatus Inicial:", ["EMITIDO", "CANCELADO"])
+            concepto_m = st.selectbox("Concepto:", ["1. COMPROBACIÓN DE GASTOS", "2. FINIQUITO", "3. ABONO A FINANCIERA", "4. APERTURA DE FONDO FIJO", "5. PAGO DE NÓMINA", "6. GASTO POR COMPROBAR", "7. APOYO POR DEFUNCIÓN", "8. GRATIFICACIONES", "9. PENSIÓN ALIMENTICIA", "10. RETENCION A PROVEEDOR", "11. PAGO DE TRÁMITES", "12. OTRO MOTIVO"])
+            estatus_m = st.selectbox("Estatus Inicial:", ["EMITIDO", "CANCELADO"])
             obs_m = st.text_area("Observaciones:")
-            
-            baja_causa = st.text_input("Causa de la Baja (Solo si aplica para Finiquitos):")
-            baja_fecha = st.text_input("Fecha de la Baja (DD/MM/AAAA - Solo Finiquitos):")
+            baja_causa = st.text_input("Causa de la Baja:")
+            baja_fecha = st.text_input("Fecha de la Baja (DD/MM/AAAA):")
             
             if st.form_submit_button("Guardar Cheque en Servidor SQL"):
                 vale_inicial = "PENDIENTE ❌" if sello_m == "NO" else "NO REQUERIDO"
@@ -350,10 +354,11 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                 }
                 df_manual = forzar_mayusculas_y_limpieza(pd.DataFrame([nuevo_reg]))
                 df_unificado = pd.concat([st.session_state["MASTER_CHEQUES"], df_manual], ignore_index=True).drop_duplicates(subset=["EMPRESA", "FOLIO"], keep="last")
-                guardar_en_sql(db_client, df_unificado)
-                st.session_state["MASTER_CHEQUES"] = df_unificado
-                st.success(f"¡Cheque Folio {folio_m} guardado exitosamente en SQL!")
-                st.rerun()
+                
+                if guardar_en_sql(db_client, df_unificado):
+                    st.session_state["MASTER_CHEQUES"] = df_unificado
+                    st.success(f"¡Cheque Folio {folio_m} guardado exitosamente en SQL!")
+                    st.rerun()
 
     with tab_boveda:
         st.subheader("📂 Bóveda Transaccional de Soportes")
@@ -372,9 +377,9 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                     col_target = "EVIDENCIA_VALE" if tipo_ev == "VALE DE EFECTIVO" else "EVIDENCIA_CANCELADO"
                     st.session_state["MASTER_CHEQUES"].loc[idx_target, col_target] = archivo_ev.name.upper()
                     
-                    guardar_en_sql(db_client, st.session_state["MASTER_CHEQUES"])
-                    st.success("¡Soporte guardado permanentemente!")
-                    st.rerun()
+                    if guardar_en_sql(db_client, st.session_state["MASTER_CHEQUES"]):
+                        st.success("¡Soporte guardado permanentemente!")
+                        st.rerun()
             else: st.write("Sin folios registrados para esta empresa.")
 
     with tab_exportar:
