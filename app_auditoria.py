@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# Configuración global del sistema ajustada a las últimas directrices de Streamlit
+# Configuración global del sistema
 st.set_page_config(page_title="Sistema de Control Transaccional - Cheques", layout="wide")
 
 # ==========================================
@@ -16,7 +16,6 @@ def sanitizar_para_streamlit(df):
     if df is None or df.empty:
         return df
     for col in df.columns:
-        # Si la columna es de texto/objeto, aseguramos que todo sea estrictamente String
         if df[col].dtype == 'object':
             df[col] = df[col].fillna('').astype(str).str.strip()
     return df
@@ -28,11 +27,6 @@ def limpiar_columna_monto(df, columna):
         df[columna] = df[columna].str.strip()
         df[columna] = pd.to_numeric(df[columna], errors='coerce').fillna(0)
     return df
-
-def estandarizar_referencia(val):
-    if pd.isna(val) or val == "":
-        return ""
-    return str(val).strip().split('.')[0].lstrip('0')
 
 # ==========================================
 # 1. BASE DE DATOS INTERNA (PERSISTENCIA)
@@ -101,19 +95,32 @@ if opcion == "📥 Alimentar / Capturar Cheques":
             if st.button("Procesar e Integrar al Histórico"):
                 df_temp = pd.read_excel(archivo_nuevo)
                 
-                # Forzar limpiezas de montos para evitar choques de tipos
+                # 🔥 BLINDAJE ULTRA: Forzar encabezados a mayúsculas limpias
+                df_temp.columns = df_temp.columns.astype(str).str.upper().str.strip()
+                
+                # Si falta la columna OBSERVACIONES o cualquier otra estándar, la creamos vacía
+                columnas_obligatorias = ["FECHA DE EMISIÓN", "FOLIO", "MONTO", "BENEFICIARIO", "CUENTA CON SELLO", "CONCEPTO", "OBSERVACIONES"]
+                for col_req in columnas_obligatorias:
+                    if col_req not in df_temp.columns:
+                        df_temp[col_req] = ""
+                
+                # Forzar limpiezas de montos
                 df_temp = limpiar_columna_monto(df_temp, 'MONTO')
-                df_temp = limpiar_columna_monto(df_temp, 'Cargos')
                 
+                # Asignar metadatos de control seguro
                 df_temp["EMPRESA"] = empresa_carga
-                df_temp["ESTATUS_CHEQUE"] = df_temp["OBSERVACIONES"].astype(str).apply(lambda x: "CANCELADO" if "CANCELADO" in x.upper() else "EMITIDO")
+                df_temp["ESTATUS_CHEQUE"] = df_temp["OBSERVACIONES"].astype(str).apply(
+                    lambda x: "CANCELADO" if "CANCELADO" in x.upper() else "EMITIDO"
+                )
                 
-                for col in ["CAUSA DE LA BAJA", "FECHA DE BAJA"]:
-                    if col not in df_temp.columns: df_temp[col] = ""
+                for col in ["CAUSA DE LA BAJA", "FECHA DE BAJA", "FECHA DE COBRO"]:
+                    if col not in df_temp.columns: df_temp[col] = np.nan
                 
-                # Sanitizar antes de guardar en memoria
+                # Reordenar para que encaje perfecto con la base maestra
+                df_temp = df_temp.reindex(columns=st.session_state["MASTER_CHEQUES"].columns)
                 df_temp = sanitizar_para_streamlit(df_temp)
                 
+                # Integrar a la base histórica
                 st.session_state["MASTER_CHEQUES"] = pd.concat([st.session_state["MASTER_CHEQUES"], df_temp], ignore_index=True).drop_duplicates(subset=["EMPRESA", "FOLIO"], keep="last")
                 st.success(f"¡Se han integrado correctamente los registros para {empresa_carga}!")
 
@@ -196,9 +203,9 @@ elif opcion == "🔍 Auditoría y Alertas Forenses":
     folios_banco_cobrados = []
     if archivo_banco:
         df_banco = pd.read_excel(archivo_banco)
-        # Limpiamos montos críticos del banco para que no truene si hay texto mezclado
-        df_banco = limpiar_columna_monto(df_banco, 'Cargos')
-        df_banco = limpiar_columna_monto(df_banco, 'Saldo')
+        df_banco.columns = df_banco.columns.astype(str).str.upper().str.strip()
+        df_banco = limpiar_columna_monto(df_banco, 'CARGOS')
+        df_banco = limpiar_columna_monto(df_banco, 'SALDO')
         df_banco = sanitizar_para_streamlit(df_banco)
         
         for col_b in df_banco.columns:
@@ -213,23 +220,25 @@ elif opcion == "🔍 Auditoría y Alertas Forenses":
 
     st.markdown("---")
     
-    # Ejecución de reglas forenses
+    # Ejecución de reglas forenses seguras
     alertas_bbva = df_master[df_master["EMPRESA"].isin(CHEQUERAS_INACTIVAS)]
     
-    finiquitos = df_master[df_master["CONCEPTO"].str.contains("Finiquito", na=False)]
+    df_master["CONCEPTO_STR"] = df_master["CONCEPTO"].fillna("").astype(str)
+    finiquitos = df_master[df_master["CONCEPTO_STR"].str.contains("Finiquito", na=False)]
     dup_finiquitos = finiquitos[finiquitos.duplicated(subset=["BENEFICIARIO"], keep=False)]
     
     cancelados = df_master[df_master["ESTATUS_CHEQUE"] == "CANCELADO"].copy()
-    cancelados["¿COBRADO_EN_BANCO?"] = cancelados["FOLIO"].apply(lambda x: "🚨 SÍ COBRADO" if int(x) in folios_banco_cobrados else "OK (No cobrado)")
+    cancelados["FOLIO_INT"] = pd.to_numeric(cancelados["FOLIO"], errors='coerce').fillna(-1).astype(int)
+    cancelados["¿COBRADO_EN_BANCO?"] = cancelados["FOLIO_INT"].apply(lambda x: "🚨 SÍ COBRADO" if x in folios_banco_cobrados and x != -1 else "OK (No cobrado)")
     fraudes_cancelados = cancelados[cancelados["¿COBRADO_EN_BANCO?"] == "🚨 SÍ COBRADO"]
     
-    gratif = df_master[df_master["CONCEPTO"].str.contains("Gratificaciones", na=False)]
+    gratif = df_master[df_master["CONCEPTO_STR"].str.contains("Gratificaciones", na=False)]
     
-    gastos = df_master[df_master["CONCEPTO"].str.contains("Gasto por comprobar", na=False)].copy()
-    gastos["FECHA DE EMISIÓN"] = pd.to_datetime(gastos["FECHA DE EMISIÓN"])
+    gastos = df_master[df_master["CONCEPTO_STR"].str.contains("Gasto por comprobar", na=False)].copy()
+    gastos["FECHA DE EMISIÓN"] = pd.to_datetime(gastos["FECHA DE EMISIÓN"], errors='coerce')
     fecha_auditoria = pd.to_datetime("2026-06-05")
     gastos["DIAS_PASADOS"] = (fecha_auditoria - gastos["FECHA DE EMISIÓN"]).dt.days
-    gastos_vencidos = gastos[(gastos["DIAS_PASADOS"] > 7) & (gastos["FECHA DE COBRO"].isna())]
+    gastos_vencidos = gastos[(gastos["DIAS_PASADOS"] > 7) & (gastos["FECHA DE COBRO"].replace('', np.nan).isna())]
 
     c1, c2, c3 = st.columns(3)
     c1.metric("🚨 Finiquitos Duplicados", f"{len(dup_finiquitos)} alertas", delta_color="inverse")
@@ -264,7 +273,7 @@ elif opcion == "🔍 Auditoría y Alertas Forenses":
 # MÓDULO: DASHBOARD Y GRÁFICOS
 # ==========================================
 elif opcion == "📊 Dashboard y Gráficos":
-    st.title("📊 Métricas Ejecutivas e Indicadores Mensuales")
+    st.title("📊 Métricas Ejecetivas e Indicadores Mensuales")
     st.markdown("---")
     
     df_m = st.session_state["MASTER_CHEQUES"].copy()
@@ -275,8 +284,8 @@ elif opcion == "📊 Dashboard y Gráficos":
         st.stop()
         
     df_m["MONTO"] = pd.to_numeric(df_m["MONTO"], errors="coerce").fillna(0)
-    df_m["FECHA DE EMISIÓN"] = pd.to_datetime(df_m["FECHA DE EMISIÓN"])
-    df_m["MES"] = df_m["FECHA DE EMISIÓN"].dt.strftime('%Y-%m')
+    df_m["FECHA DE EMISIÓN"] = pd.to_datetime(df_m["FECHA DE EMISIÓN"], errors='coerce')
+    df_m["MES"] = df_m["FECHA DE EMISIÓN"].dt.strftime('%Y-%m').fillna("Sin Fecha")
 
     emp_filtro = st.multiselect("Filtrar Gráficos por Empresa:", ["TODAS"] + LISTA_EMPRESAS, default=["TODAS"])
     if "TODAS" not in emp_filtro:
