@@ -36,7 +36,7 @@ INV_DB_MAP = {v: k for k, v in DB_MAP.items()}
 
 def convertir_fecha_sql(val):
     """Estandariza cualquier formato de fecha humana a cadena ISO (YYYY-MM-DD) para SQL"""
-    if pd.isna(val) or str(val).strip() in ["", "NONE", "NAN", "<NAT>", "00/00/0000"]:
+    if pd.isna(val) or str(val).strip() in ["", "NONE", "NAN", "<NAT>", "00/00/0000"] or "PENDIENTE" in str(val).upper():
         return None
     try:
         dt = pd.to_datetime(val, errors='coerce')
@@ -50,6 +50,9 @@ def formatear_fecha_visor(val):
     """Convierte cualquier formato de fecha de la DB a DD/MM/AAAA de forma ultra-segura (Anti-Crash)"""
     if pd.isna(val) or str(val).strip() in ["", "NONE", "NAN", "<NAT>", "00/00/0000"]:
         return ""
+    val_str = str(val).strip().upper()
+    if "PENDIENTE" in val_str:
+        return str(val).strip().upper() # Preservamos el texto visualmente para comodidad del usuario
     try:
         dt = pd.to_datetime(val, errors='coerce')
         if pd.notna(dt) and dt is not pd.NaT:
@@ -105,7 +108,7 @@ def limpiar_y_convertir_monto_positivo(df, columna):
     return df
 
 # ==========================================
-# MAPA DE COLORES Y EXPORTACIÓN
+# MAPA DE COLORES Y EXPORTACIÓN V5 (DETECTOR FLEXIBLE)
 # ==========================================
 def colorear_reglas_auditoria(row):
     estilo = [''] * len(row)
@@ -116,10 +119,16 @@ def colorear_reglas_auditoria(row):
     justificante = str(row.get('EVIDENCIA_CANCELADO', '')).strip()
     f_emision = pd.to_datetime(row.get('FECHA DE EMISIÓN'), errors='coerce')
     
+    # 🔥 DETECTOR INTELIGENTE DE TRÁNSITOS: Captura vacíos, nulos y la palabra "PENDIENTE"
+    f_cobro_str = str(row.get('FECHA DE COBRO', '')).strip().upper()
+    es_pendiente_cobro = f_cobro_str == "" or "PENDIENTE" in f_cobro_str or f_cobro_str in ["NAN", "NONE", "<NAT>", "00/00/0000"]
+    
     if "GRATIFICACI" in concepto: return ['background-color: #ffcccc; color: #cc0000; font-weight: bold'] * len(row)
     if estatus == "CANCELADO" and (justificante == "" or "PENDIENTE" in justificante): return ['background-color: #fce5cd; color: #b45f06'] * len(row)
     if ("NO" == sello or "SIN SELLO" in sello) and (vale == "" or "PENDIENTE" in vale) and estatus != "CANCELADO": return ['background-color: #fff2cc; color: #856404'] * len(row)
-    if estatus != "CANCELADO" and pd.notna(f_emision) and (str(row.get('FECHA DE COBRO', '')).strip() == ""):
+    
+    # 🔵 Aplicar Alerta Azul considerando la nueva regla flexible de pendientes
+    if estatus != "CANCELADO" and pd.notna(f_emision) and es_pendiente_cobro:
         if (datetime.now() - f_emision).days > 7: return ['background-color: #e6f2ff; color: #0b5394'] * len(row)
     return estilo
 
@@ -139,11 +148,15 @@ def generar_excel_coloreado(df):
         vale, justificante = str(row.get('EVIDENCIA_VALE','')).strip(), str(row.get('EVIDENCIA_CANCELADO','')).strip()
         f_emision = pd.to_datetime(row.get('FECHA DE EMISIÓN'), errors='coerce')
         
+        # Sincronizar regla flexible también en la exportación física a Excel
+        f_cobro_str = str(row.get('FECHA DE COBRO', '')).strip().upper()
+        es_pendiente_cobro = f_cobro_str == "" or "PENDIENTE" in f_cobro_str or f_cobro_str in ["NAN", "NONE", "<NAT>", "00/00/0000"]
+        
         fill_actual = None
         if "GRATIFICACI" in concepto: fill_actual = f_rojo
         elif estatus == "CANCELADO" and (justificante == "" or "PENDIENTE" in justificante): fill_actual = f_naranja
         elif ("NO" == sello or "SIN SELLO" in sello) and (vale == "" or "PENDIENTE" in vale) and estatus != "CANCELADO": fill_actual = f_amarillo
-        elif estatus != "CANCELADO" and pd.notna(f_emision) and (str(row.get('FECHA DE COBRO', '')).strip() == ""):
+        elif estatus != "CANCELADO" and pd.notna(f_emision) and es_pendiente_cobro:
             if (datetime.now() - f_emision).days > 7: fill_actual = f_azul
             
         if fill_actual:
@@ -192,13 +205,13 @@ if opcion == "📥 Alimentar / Capturar Cheques":
         st.subheader("Modificación de Celdas en Tiempo Real")
         if not st.session_state["MASTER_CHEQUES"].empty:
             df_m = st.session_state["MASTER_CHEQUES"].copy()
-            for col_f in ["FECHA DE EMISIÓN", "FECHA DE COBRO", "FECHA DE BAJA"]:
+            # Dejar pasar textos especiales en fecha_cobro para el editor interactivo
+            for col_f in ["FECHA DE EMISIÓN", "FECHA DE BAJA"]:
                 df_m[col_f] = pd.to_datetime(df_m[col_f], errors='coerce')
             df_m = df_m.sort_values(by="FOLIO", ascending=True)
 
             df_editado = st.data_editor(df_m, num_rows="dynamic", width="stretch", column_config={
                 "FECHA DE EMISIÓN": st.column_config.DateColumn(format="DD/MM/YYYY"),
-                "FECHA DE COBRO": st.column_config.DateColumn(format="DD/MM/YYYY"),
                 "FECHA DE BAJA": st.column_config.DateColumn(format="DD/MM/YYYY"),
                 "MONTO": st.column_config.NumberColumn(format="$%.2f"),
                 "CUENTA CON SELLO": st.column_config.SelectboxColumn(options=["SI", "NO", "NO APLICA"]),
@@ -238,7 +251,6 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                 if header_idx is not None:
                     df_temp = df_raw.iloc[header_idx+1:].copy()
                     
-                    # 🔥 ESCUDO ANTI-DUPLICADOS: Resuelve el error de PyArrow
                     encabezados_crudos = [str(c).strip().upper() for c in df_raw.iloc[header_idx].values]
                     encabezados_unicos = []
                     conteos = {}
@@ -332,7 +344,7 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                 nuevo_reg = {
                     "EMPRESA": emp_m, "FECHA DE EMISIÓN": str(fecha_m), "FOLIO": int(folio_m),
                     "MONTO": monto_m, "BENEFICIARIO": benef_m, "CUENTA CON SELLO": sello_m,
-                    "FECHA DE COBRO": "", "CONCEPTO": concepto_m, "OBSERVACIONES": obs_m,
+                    "FECHA DE COBRO": "PENDIENTE DE PAGO", "CONCEPTO": concepto_m, "OBSERVACIONES": obs_m,
                     "CAUSA DE LA BAJA": baja_causa, "FECHA DE BAJA": baja_fecha, "ESTATUS_CHEQUE": estatus_m,
                     "EVIDENCIA_VALE": vale_inicial, "EVIDENCIA_CANCELADO": canc_inicial
                 }
@@ -371,7 +383,7 @@ if opcion == "📥 Alimentar / Capturar Cheques":
             excel_binario = generar_excel_coloreado(st.session_state["MASTER_CHEQUES"])
             st.download_button(label="📥 Descargar Excel con Colores de Alerta", data=excel_binario, file_name="Auditoria_SQL_Color.xlsx")
 
-    # 🔥 VISOR DE MAPA DE CALOR CON ESCUDO ANTI-CRASH DE FECHAS ACTIVO
+    # VISOR DE MAPA DE CALOR
     st.markdown("---")
     st.subheader("👁️ Visor Forense General (Base de Datos Real en la Nube)")
     if not st.session_state["MASTER_CHEQUES"].empty:
