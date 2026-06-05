@@ -109,10 +109,10 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                 if header_idx is not None:
                     df_temp = df_raw.iloc[header_idx+1:].copy()
                     
-                    # Generar lista inicial de encabezados en mayúsculas
+                    # Encabezados limpios en mayúsculas
                     encabezados_crudos = [str(c).strip().upper() for c in df_raw.iloc[header_idx].values]
                     
-                    # 🔥 REGLA ANTI-DUPLICADOS: Renombrar nombres idénticos (como los múltiples 'NAN' del final)
+                    # Forzar nombres únicos para columnas basura de la derecha (nan)
                     encabezados_unicos = []
                     conteos = {}
                     for col in encabezados_crudos:
@@ -123,30 +123,29 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                             conteos[col] = 0
                             encabezados_unicos.append(col)
                     
-                    # Asignar los nombres completamente únicos al DataFrame
                     df_temp.columns = encabezados_unicos
                     
-                    st.info(f"📋 ¡Formato de Chequera Detectado! Omitimos las filas de título del banco. Identificamos un bloque de datos para procesar.")
+                    st.info(f"📋 ¡Formato de Chequera Detectado! Omitimos las filas de título del banco.")
                     st.write("Vista previa de las primeras filas identificadas:")
                     st.dataframe(df_temp.head(3), width='stretch')
                     
                     if st.button("🚀 Confirmar e Integrar estas filas al Histórico Master"):
-                        # Diccionario inteligente de traducción de alias
+                        # 🎯 DICCIONARIO DE ALIAS EXACTOS (Evita colisiones de nombres)
                         mapeo_columnas = {
-                            "FECHA DE EMISIÓN": ["FECHA DE EMISIÓN", "FECHA DE EMISION", "EMISION", "EMISIÓN", "FECHA"],
-                            "FOLIO": ["FOLIO", "NUMERO", "NÚMERO", "NÚM", "NUM", "CHEQUE"],
+                            "FECHA DE EMISIÓN": ["FECHA DE EMISIÓN", "FECHA DE EMISION", "FECHA EMISION", "FECHA EMISIÓN"],
+                            "FOLIO": ["FOLIO", "NUMERO", "NÚMERO", "NÚM", "NUM", "CHEQUE", "FOLIOS"],
                             "MONTO": ["MONTO", "IMPORTE", "CANTIDAD", "CARGOS"],
                             "BENEFICIARIO": ["BENEFICIARIO", "NOMBRE", "PROVEEDOR", "A FAVOR DE"],
                             "CUENTA CON SELLO": ["CUENTA CON SELLO", "SELLO", "CON SELLO"],
-                            "FECHA DE COBRO": ["FECHA DE COBRO", "FECHA DE COBRO (DEPOSITO EN CUENTA)", "COBRO", "DEPOSITO"],
+                            "FECHA DE COBRO": ["FECHA DE COBRO (DEPOSITO EN CUENTA)", "FECHA DE COBRO", "FECHA COBRO", "COBRO", "DEPOSITO"],
                             "CONCEPTO": ["CONCEPTO", "MOTIVO", "DESCRIPCION", "DESCRIPCIÓN"],
-                            "OBSERVACIONES": ["OBSERVACIONES", "NOTAS", "COMENTARIOS"]
+                            "OBSERVACIONES": ["OBSERVACIONES", "NOTAS", "COMENTARIOS", "OBSERVACION"]
                         }
                         
                         columnas_nuevas = {}
                         for col_excel in df_temp.columns:
                             for col_estandar, lista_alias in mapeo_columnas.items():
-                                if col_excel in lista_alias or any(alias in col_excel for alias in lista_alias):
+                                if col_excel in lista_alias: # ⚡ CAMBIO CRÍTICO: Búsqueda exacta para evitar choques
                                     columnas_nuevas[col_excel] = col_estandar
                                     break
                         df_temp = df_temp.rename(columns=columnas_nuevas)
@@ -155,14 +154,16 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                             if col_estandar not in df_temp.columns:
                                 df_temp[col_estandar] = np.nan if "FECHA" in col_estandar else ""
                         
-                        # Filtro para remover filas completamente en blanco del cierre de mes
-                        df_temp = df_temp[df_temp["FECHA DE EMISIÓN"].notna() & (df_temp["FECHA DE EMISIÓN"].astype(str).str.strip() != "")]
+                        # Filtro seguro para remover las filas en blanco del cierre de mes
+                        df_temp = df_temp[df_temp["FECHA DE EMISIÓN"].notna()]
+                        df_temp = df_temp[df_temp["FECHA DE EMISIÓN"].astype(str).str.strip() != ""]
+                        df_temp = df_temp[df_temp["FECHA DE EMISIÓN"].astype(str).str.upper().str.strip() != "NAN"]
                         
                         df_temp = limpiar_columna_monto(df_temp, 'MONTO')
                         df_temp["FOLIO"] = pd.to_numeric(df_temp["FOLIO"], errors='coerce').fillna(0).astype(int)
                         df_temp["EMPRESA"] = empresa_carga
                         
-                        # Detección inteligente de cancelados en múltiples columnas
+                        # Detección inteligente de cancelados
                         df_temp["ESTATUS_CHEQUE"] = df_temp.apply(
                             lambda r: "CANCELADO" if "CANCELADO" in str(r.get("OBSERVACIONES", "")).upper() or \
                                                      "CANCELADO" in str(r.get("BENEFICIARIO", "")).upper() or \
