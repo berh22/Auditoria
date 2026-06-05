@@ -222,8 +222,21 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                 
                 if header_idx is not None:
                     df_temp = df_raw.iloc[header_idx+1:].copy()
-                    df_temp.columns = [str(c).strip().upper() for c in df_raw.iloc[header_idx].values]
-                    st.info("Estructura identificada de forma correcta. Vista previa del archivo:")
+                    
+                    # 🔥 ESCUDO ANTI-DUPLICADOS (CORREGIDO Y RESTAURADO): Resuelve el error de PyArrow
+                    encabezados_crudos = [str(c).strip().upper() for c in df_raw.iloc[header_idx].values]
+                    encabezados_unicos = []
+                    conteos = {}
+                    for col in encabezados_crudos:
+                        if col in conteos:
+                            conteos[col] += 1
+                            encabezados_unicos.append(f"{col}_{conteos[col]}")
+                        else:
+                            conteos[col] = 0
+                            encabezados_unicos.append(col)
+                    df_temp.columns = encabezados_unicos
+                    
+                    st.info("Estructura de columnas identificada de forma correcta. Vista previa de los datos:")
                     st.dataframe(df_temp.head(2), width='stretch')
                     
                     if st.button("🚀 Activar Filtros de Preservación e Inyectar en SQL"):
@@ -243,25 +256,19 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                             columnas_nuevas = {col: est for col in df_temp.columns for est, aliases in mapeo_columnas.items() if col in aliases}
                             df_temp = df_temp.rename(columns=columnas_nuevas)
                             
-                            # Rellenar con columnas estándar si no existen (como en el caso de Contpaq)
                             for col in st.session_state["MASTER_CHEQUES"].columns:
                                 if col not in df_temp.columns: df_temp[col] = ""
                             
-                            # Filtro: Destruir folios fantasma o celdas vacías del final del Excel
                             df_temp = df_temp[df_temp["FOLIO"].notna() & (df_temp["FOLIO"].astype(str).str.strip() != "")]
-                            
                             df_temp = limpiar_y_convertir_monto_positivo(df_temp, 'MONTO')
                             df_temp["FOLIO"] = pd.to_numeric(df_temp["FOLIO"], errors='coerce').fillna(0).astype(int)
                             
-                            # 🔥 REGLA DE PRESERVACIÓN: Si la columna empresa ya venía llena en tu histórico, déjala. Si no, usa el selectbox
                             if df_temp["EMPRESA"].astype(str).str.strip().eq("").all():
                                 df_temp["EMPRESA"] = empresa_carga
                             
-                            # 🔥 REGLA DE PRESERVACIÓN DE ESTATUS
                             if df_temp["ESTATUS_CHEQUE"].astype(str).str.strip().eq("").all():
                                 df_temp["ESTATUS_CHEQUE"] = df_temp.apply(lambda r: "CANCELADO" if "CANCELADO" in str(r.get("OBSERVACIONES","")).upper() or "CANCELADO" in str(r.get("BENEFICIARIO","")).upper() else "EMITIDO", axis=1)
                             
-                            # 🔥 REGLA DE PRESERVACIÓN DE EVIDENCIAS
                             if "EVIDENCIA_VALE" not in df_temp.columns or df_temp["EVIDENCIA_VALE"].astype(str).str.strip().eq("").all():
                                 df_temp["EVIDENCIA_VALE"] = df_temp.apply(lambda r: "PENDIENTE ❌" if str(r.get("CUENTA CON SELLO","")).upper() == "NO" else "NO REQUERIDO", axis=1)
                             
@@ -292,7 +299,7 @@ if opcion == "📥 Alimentar / Capturar Cheques":
             
             c7, c8 = st.columns(2)
             concepto_m = c7.selectbox("Concepto del Cheque:", [
-                "1. COMPROBACIÓN DE GASTOS", "2. FINIQUITO", "3. ABONO A FINANCIERA", 
+                "1. COMPROBACIÓN DE GASTOS", "2. FINIQUITO", "3. ABONO A FINANERA", 
                 "4. APERTURA DE FONDO FIJO", "5. PAGO DE NÓMINA", "6. GASTO POR COMPROBAR", 
                 "7. APOYO POR DEFUNCIÓN", "8. GRATIFICACIONES", "9. PENSIÓN ALIMENTICIA", 
                 "10. RETENCION A PROVEEDOR", "11. PAGO DE TRÁMITES", "12. OTRO MOTIVO"
