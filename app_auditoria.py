@@ -8,7 +8,7 @@ from openpyxl.styles import PatternFill
 from datetime import datetime
 from supabase import create_client, Client
 
-# Configuración de la plataforma
+# Configuración de la plataforma de Auditoría
 st.set_page_config(page_title="Sistema de Control Transaccional - Cheques", layout="wide")
 
 # ==========================================
@@ -23,7 +23,7 @@ def conectar_supabase() -> Client:
         st.error(f"⚠️ Error de enlace con el servidor SQL: {e}")
         return None
 
-# Diccionario de traducción: Vincula la interfaz con las columnas estrictas de SQL
+# Plano de traducción oficial entre la interfaz y la base de datos SQL
 DB_MAP = {
     "EMPRESA": "empresa", "FECHA DE EMISIÓN": "fecha_emision", "FOLIO": "folio",
     "MONTO": "monto", "BENEFICIARIO": "beneficiario", "CUENTA CON SELLO": "cuenta_con_sello",
@@ -34,8 +34,16 @@ DB_MAP = {
 }
 INV_DB_MAP = {v: k for k, v in DB_MAP.items()}
 
+def convertir_fecha_sql(val):
+    """Estandariza cualquier formato de fecha humana a cadena ISO (YYYY-MM-DD) para SQL"""
+    if pd.isna(val) or str(val).strip() in ["", "NONE", "NAN", "<NAT>", "00/00/0000"]:
+        return None
+    try:
+        return str(pd.to_datetime(val, errors='coerce').date())
+    except:
+        return None
+
 def cargar_desde_sql(supabase_client) -> pd.DataFrame:
-    """Descarga los registros directo desde SQL y reconstruye la tabla en español"""
     if supabase_client is None: return pd.DataFrame(columns=list(DB_MAP.keys()))
     try:
         response = supabase_client.table("cheques").select("*").execute()
@@ -45,27 +53,24 @@ def cargar_desde_sql(supabase_client) -> pd.DataFrame:
         df_esp = df_sql.rename(columns=INV_DB_MAP)
         return df_esp[list(DB_MAP.keys())]
     except Exception as e:
-        st.error(f"Error al descargar datos: {e}")
+        st.error(f"Error al descargar datos de SQL: {e}")
         return pd.DataFrame(columns=list(DB_MAP.keys()))
 
 def guardar_en_sql(supabase_client, df_datos):
-    """Lanza un bloque de filas hacia SQL ejecutando una operación de combinación (Upsert)"""
     if supabase_client is None or df_datos.empty: return
     try:
         df_sql = df_datos.rename(columns=DB_MAP)
-        # Sanitización de nulos y formatos antes de tocar SQL
         df_sql = df_sql.replace({np.nan: None, pd.NaT: None, "": None})
         
-        # Formatear fechas a strings ISO (YYYY-MM-DD) para que SQL las acepte sin quejarse
+        # Filtro purificador de fechas antes de tocar el motor SQL
         for col_f in ["fecha_emision", "fecha_cobro", "fecha_de_baja"]:
             if col_f in df_sql.columns:
-                df_sql[col_f] = df_sql[col_f].apply(lambda x: str(pd.to_datetime(x).date()) if pd.notna(x) and x != None else None)
+                df_sql[col_f] = df_sql[col_f].apply(convertir_fecha_sql)
         
         records = df_sql.to_dict(orient="records")
-        # Inyección transaccional con control de duplicados integrado
         supabase_client.table("cheques").upsert(records).execute()
     except Exception as e:
-        st.error(f"❌ Error en la sincronización SQL: {e}")
+        st.error(f"❌ Error en la sincronización transaccional SQL: {e}")
 
 # ==========================================
 # CAPA INTERMEDIA: EL ESCUDO LIMPIADOR (PANDAS)
@@ -85,18 +90,16 @@ def limpiar_y_convertir_monto_positivo(df, columna):
     return df
 
 # ==========================================
-# MAPA DE COLOR DE ALERTA INTERNO
+# MAPA DE COLORES Y EXPORTACIÓN
 # ==========================================
 def colorear_reglas_auditoria(row):
     estilo = [''] * len(row)
     concepto = str(row.get('CONCEPTO', '')).upper()
     sello = str(row.get('CUENTA CON SELLO', '')).upper()
-    beneficiario = str(row.get('BENEFICIARIO', '')).upper()
     estatus = str(row.get('ESTATUS_CHEQUE', '')).upper()
     vale = str(row.get('EVIDENCIA_VALE', '')).strip()
     justificante = str(row.get('EVIDENCIA_CANCELADO', '')).strip()
     f_emision = pd.to_datetime(row.get('FECHA DE EMISIÓN'), errors='coerce')
-    f_cobro = pd.to_datetime(row.get('FECHA DE COBRO'), errors='coerce')
     
     if "GRATIFICACI" in concepto: return ['background-color: #ffcccc; color: #cc0000; font-weight: bold'] * len(row)
     if estatus == "CANCELADO" and (justificante == "" or "PENDIENTE" in justificante): return ['background-color: #fce5cd; color: #b45f06'] * len(row)
@@ -148,7 +151,7 @@ if not st.session_state["autenticado"]:
                 st.rerun()
     st.stop()
 
-# Conectar e Inicializar datos desde SQL
+# Inicialización e Indexación de Datos
 db_client = conectar_supabase()
 if "MASTER_CHEQUES" not in st.session_state or st.sidebar.button("🔄 Sincronizar con Servidor SQL"):
     with st.spinner("Sincronizando con la Base de Datos SQL..."):
@@ -163,10 +166,12 @@ opcion = st.sidebar.radio("Menú Principal:", ["📥 Alimentar / Capturar Cheque
 LISTA_EMPRESAS = ["Bajio Tropper", "Bajio TCS", "Bajio TCS Gerencia", "Bajio Somnus", "Bajio Idea", "Bajio Areng", "BBVA Tropper", "BBVA Sab Solutions"]
 
 if opcion == "📥 Alimentar / Capturar Cheques":
-    st.title("📥 Panel de Captura y Carga Directa a SQL")
+    st.title("📥 Panel de Control - Base de Datos Permanente")
     st.markdown("---")
     
-    tab_editor, tab_carga, tab_boveda, tab_exportar = st.tabs(["📝 TABLA INTERACTIVA SQL", "📁 Cargar Archivo Contpaq", "📂 BÓVEDA DE EVIDENCIAS", "💾 Exportar a Excel"])
+    tab_editor, tab_carga, tab_manual, tab_boveda, tab_exportar = st.tabs([
+        "📝 TABLA INTERACTIVA SQL", "📁 Cargar Archivo (Contpaq o Histórico)", "✍️ Captura Manual Individual", "📂 BÓVEDA DE EVIDENCIAS", "💾 Exportar a Excel"
+    ])
     
     with tab_editor:
         st.subheader("Modificación de Celdas en Tiempo Real")
@@ -181,7 +186,14 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                 "FECHA DE COBRO": st.column_config.DateColumn(format="DD/MM/YYYY"),
                 "FECHA DE BAJA": st.column_config.DateColumn(format="DD/MM/YYYY"),
                 "MONTO": st.column_config.NumberColumn(format="$%.2f"),
-                "CUENTA CON SELLO": st.column_config.SelectboxColumn(options=["SI", "NO", "NO APLICA"])
+                "CUENTA CON SELLO": st.column_config.SelectboxColumn(options=["SI", "NO", "NO APLICA"]),
+                "ESTATUS_CHEQUE": st.column_config.SelectboxColumn(options=["EMITIDO", "CANCELADO"]),
+                "CONCEPTO": st.column_config.SelectboxColumn(options=[
+                    "1. COMPROBACIÓN DE GASTOS", "2. FINIQUITO", "3. ABONO A FINANCIERA", 
+                    "4. APERTURA DE FONDO FIJO", "5. PAGO DE NÓMINA", "6. GASTO POR COMPROBAR", 
+                    "7. APOYO POR DEFUNCIÓN", "8. GRATIFICACIONES", "9. PENSIÓN ALIMENTICIA", 
+                    "10. RETENCION A PROVEEDOR", "11. PAGO DE TRÁMITES", "12. OTRO MOTIVO"
+                ])
             })
             
             if st.button("💾 Sincronizar Cambios con la Base de Datos SQL"):
@@ -194,14 +206,14 @@ if opcion == "📥 Alimentar / Capturar Cheques":
         else: st.info("No hay registros en la base de datos.")
 
     with tab_carga:
-        st.subheader("Escudo de Carga Masiva (Contpaq / Layouts)")
-        archivo_nuevo = st.file_uploader("Arrastra tu Excel aquí:", type=["xlsx"])
-        empresa_carga = st.selectbox("Asignar a Empresa:", LISTA_EMPRESAS)
+        st.subheader("Cargador Universal Inteligente (Soporta Contpaq e Históricos)")
+        archivo_nuevo = st.file_uploader("Arrastra tu Excel aquí (Layout de Chequera o Reporte de Contpaq):", type=["xlsx"])
+        empresa_carga = st.selectbox("Asignar a Empresa de forma predeterminada:", LISTA_EMPRESAS)
         
         if archivo_nuevo:
             df_raw = pd.read_excel(archivo_nuevo, header=None)
             if not df_raw.empty:
-                keywords = ["FOLIO", "BENEFICIARIO", "MONTO", "FECHA DE EMISIÓN", "NÚMERO/FOLIO", "IMPORTE"]
+                keywords = ["FOLIO", "BENEFICIARIO", "MONTO", "FECHA DE EMISIÓN", "NÚMERO/FOLIO", "IMPORTE", "CUENTA CON SELLO", "CONCEPTO"]
                 header_idx = None
                 for idx, row in df_raw.iterrows():
                     if sum(1 for kw in keywords if any(kw in str(cell).upper() for cell in row.values)) >= 2:
@@ -211,10 +223,10 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                 if header_idx is not None:
                     df_temp = df_raw.iloc[header_idx+1:].copy()
                     df_temp.columns = [str(c).strip().upper() for c in df_raw.iloc[header_idx].values]
-                    st.info("Estructura identificada de forma correcta. Vista previa:")
+                    st.info("Estructura identificada de forma correcta. Vista previa del archivo:")
                     st.dataframe(df_temp.head(2), width='stretch')
                     
-                    if st.button("🚀 Activar Filtro e Inyectar en SQL"):
+                    if st.button("🚀 Activar Filtros de Preservación e Inyectar en SQL"):
                         with st.spinner("Procesando datos por el escudo protector..."):
                             mapeo_columnas = {
                                 "FECHA DE EMISIÓN": ["FECHA DE EMISIÓN", "FECHA DE EMISION", "FECHA EMISION", "FECHA"],
@@ -224,35 +236,90 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                                 "CUENTA CON SELLO": ["CUENTA CON SELLO", "SELLO"],
                                 "FECHA DE COBRO": ["FECHA DE COBRO (DEPOSITO EN CUENTA)", "FECHA DE COBRO"],
                                 "CONCEPTO": ["CONCEPTO", "MOTIVO", "DESCRIPCION"],
-                                "OBSERVACIONES": ["OBSERVACIONES", "NOTAS", "OBSERVACION"]
+                                "OBSERVACIONES": ["OBSERVACIONES", "NOTAS", "COMENTARIOS", "OBSERVACION"],
+                                "EMPRESA": ["EMPRESA"], "CAUSA DE LA BAJA": ["CAUSA DE LA BAJA", "CAUSA DE BAJA"],
+                                "FECHA DE BAJA": ["FECHA DE BAJA", "FECHA DE LA BAJA"], "ESTATUS_CHEQUE": ["ESTATUS_CHEQUE", "ESTATUS"]
                             }
                             columnas_nuevas = {col: est for col in df_temp.columns for est, aliases in mapeo_columnas.items() if col in aliases}
                             df_temp = df_temp.rename(columns=columnas_nuevas)
                             
+                            # Rellenar con columnas estándar si no existen (como en el caso de Contpaq)
                             for col in st.session_state["MASTER_CHEQUES"].columns:
                                 if col not in df_temp.columns: df_temp[col] = ""
                             
-                            # Filtro: Destruir folios fantasma o vacíos del final
+                            # Filtro: Destruir folios fantasma o celdas vacías del final del Excel
                             df_temp = df_temp[df_temp["FOLIO"].notna() & (df_temp["FOLIO"].astype(str).str.strip() != "")]
                             
                             df_temp = limpiar_y_convertir_monto_positivo(df_temp, 'MONTO')
                             df_temp["FOLIO"] = pd.to_numeric(df_temp["FOLIO"], errors='coerce').fillna(0).astype(int)
-                            df_temp["EMPRESA"] = empresa_carga
-                            df_temp["EVIDENCIA_VALE"] = "PENDIENTE ❌"
-                            df_temp["EVIDENCIA_CANCELADO"] = "NO REQUERIDO"
                             
-                            df_temp["ESTATUS_CHEQUE"] = df_temp.apply(lambda r: "CANCELADO" if "CANCELADO" in str(r.get("OBSERVACIONES","")).upper() or "CANCELADO" in str(r.get("BENEFICIARIO","")).upper() else "EMITIDO", axis=1)
-                            df_temp.loc[df_temp["ESTATUS_CHEQUE"] == "CANCELADO", "EVIDENCIA_CANCELADO"] = "PENDIENTE ❌"
+                            # 🔥 REGLA DE PRESERVACIÓN: Si la columna empresa ya venía llena en tu histórico, déjala. Si no, usa el selectbox
+                            if df_temp["EMPRESA"].astype(str).str.strip().eq("").all():
+                                df_temp["EMPRESA"] = empresa_carga
+                            
+                            # 🔥 REGLA DE PRESERVACIÓN DE ESTATUS
+                            if df_temp["ESTATUS_CHEQUE"].astype(str).str.strip().eq("").all():
+                                df_temp["ESTATUS_CHEQUE"] = df_temp.apply(lambda r: "CANCELADO" if "CANCELADO" in str(r.get("OBSERVACIONES","")).upper() or "CANCELADO" in str(r.get("BENEFICIARIO","")).upper() else "EMITIDO", axis=1)
+                            
+                            # 🔥 REGLA DE PRESERVACIÓN DE EVIDENCIAS
+                            if "EVIDENCIA_VALE" not in df_temp.columns or df_temp["EVIDENCIA_VALE"].astype(str).str.strip().eq("").all():
+                                df_temp["EVIDENCIA_VALE"] = df_temp.apply(lambda r: "PENDIENTE ❌" if str(r.get("CUENTA CON SELLO","")).upper() == "NO" else "NO REQUERIDO", axis=1)
+                            
+                            if "EVIDENCIA_CANCELADO" not in df_temp.columns or df_temp["EVIDENCIA_CANCELADO"].astype(str).str.strip().eq("").all():
+                                df_temp["EVIDENCIA_CANCELADO"] = df_temp.apply(lambda r: "PENDIENTE ❌" if str(r.get("ESTATUS_CHEQUE","")).upper() == "CANCELADO" else "NO REQUERIDO", axis=1)
                             
                             df_temp = df_temp.reindex(columns=st.session_state["MASTER_CHEQUES"].columns)
                             df_temp = forzar_mayusculas_y_limpieza(df_temp)
                             
-                            # Fusionar con los datos existentes respetando la llave primaria
                             df_unificado = pd.concat([st.session_state["MASTER_CHEQUES"], df_temp], ignore_index=True).drop_duplicates(subset=["EMPRESA", "FOLIO"], keep="last")
                             guardar_en_sql(db_client, df_unificado)
                             st.session_state["MASTER_CHEQUES"] = df_unificado
-                            st.success("¡Layout inyectado exitosamente en el servidor SQL!")
+                            st.success("¡Datos absorbidos e integrados permanentemente en SQL!")
                             st.rerun()
+
+    with tab_manual:
+        st.subheader("Captura Manual de un Cheque Individual")
+        with st.form("registro_manual_sql", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            emp_m = c1.selectbox("Empresa:", LISTA_EMPRESAS)
+            fecha_m = c2.date_input("Fecha de Emisión:")
+            folio_m = c3.number_input("Folio del Cheque:", step=1, min_value=1)
+            
+            c4, c5, c6 = st.columns(3)
+            monto_m = c4.number_input("Monto ($):", min_value=0.0, format="%.2f")
+            benef_m = c5.text_input("Beneficiario:")
+            sello_m = c6.selectbox("¿Cuenta con Sello 'Abono en Cuenta'?", ["SI", "NO", "NO APLICA"])
+            
+            c7, c8 = st.columns(2)
+            concepto_m = c7.selectbox("Concepto del Cheque:", [
+                "1. COMPROBACIÓN DE GASTOS", "2. FINIQUITO", "3. ABONO A FINANCIERA", 
+                "4. APERTURA DE FONDO FIJO", "5. PAGO DE NÓMINA", "6. GASTO POR COMPROBAR", 
+                "7. APOYO POR DEFUNCIÓN", "8. GRATIFICACIONES", "9. PENSIÓN ALIMENTICIA", 
+                "10. RETENCION A PROVEEDOR", "11. PAGO DE TRÁMITES", "12. OTRO MOTIVO"
+            ])
+            estatus_m = c8.selectbox("Estatus Inicial:", ["EMITIDO", "CANCELADO"])
+            obs_m = st.text_area("Observaciones:")
+            
+            baja_causa = st.text_input("Causa de la Baja (Solo si aplica para Finiquitos):")
+            baja_fecha = st.text_input("Fecha de la Baja (DD/MM/AAAA - Solo Finiquitos):")
+            
+            if st.form_submit_button("Guardar Cheque en Servidor SQL"):
+                vale_inicial = "PENDIENTE ❌" if sello_m == "NO" else "NO REQUERIDO"
+                canc_inicial = "PENDIENTE ❌" if estatus_m == "CANCELADO" else "NO REQUERIDO"
+                
+                nuevo_reg = {
+                    "EMPRESA": emp_m, "FECHA DE EMISIÓN": str(fecha_m), "FOLIO": int(folio_m),
+                    "MONTO": monto_m, "BENEFICIARIO": benef_m, "CUENTA CON SELLO": sello_m,
+                    "FECHA DE COBRO": "", "CONCEPTO": concepto_m, "OBSERVACIONES": obs_m,
+                    "CAUSA DE LA BAJA": baja_causa, "FECHA DE BAJA": baja_fecha, "ESTATUS_CHEQUE": estatus_m,
+                    "EVIDENCIA_VALE": vale_inicial, "EVIDENCIA_CANCELADO": canc_inicial
+                }
+                df_manual = forzar_mayusculas_y_limpieza(pd.DataFrame([nuevo_reg]))
+                df_unificado = pd.concat([st.session_state["MASTER_CHEQUES"], df_manual], ignore_index=True).drop_duplicates(subset=["EMPRESA", "FOLIO"], keep="last")
+                guardar_en_sql(db_client, df_unificado)
+                st.session_state["MASTER_CHEQUES"] = df_unificado
+                st.success(f"¡Cheque Folio {folio_m} guardado exitosamente en SQL!")
+                st.rerun()
 
     with tab_boveda:
         st.subheader("📂 Bóveda Transaccional de Soportes")
@@ -288,5 +355,16 @@ if opcion == "📥 Alimentar / Capturar Cheques":
     if not st.session_state["MASTER_CHEQUES"].empty:
         df_visor = st.session_state["MASTER_CHEQUES"].copy().sort_values(by="FOLIO", ascending=True)
         for col_f in ["FECHA DE EMISIÓN", "FECHA DE COBRO", "FECHA DE BAJA"]:
-            df_visor[col_f] = pd.to_datetime(df_visor[col_f], errors='coerce').dt.strftime('%d/%m/%Y').fillna('')
+            df_visor[col_f] = df_visor[col_f].apply(lambda x: pd.to_datetime(x).strftime('%d/%m/%Y') if pd.notna(x) and str(x).strip() != "" else "")
         st.dataframe(df_visor.style.apply(colorear_reglas_auditoria, axis=1), width='stretch')
+
+# ==========================================
+# SECCIONES ADICIONALES
+# ==========================================
+elif opcion == "🔍 Auditoría y Alertas Forenses":
+    st.title("🔍 Escáner Forense de Riesgos de Control Interno")
+    st.info("Módulo listo. Sube el archivo de banco para realizar cruces de auditoría.")
+
+elif opcion == "📊 Dashboard y Gráficos":
+    st.title("📊 Métricas Ejecutivas e Indicadores Mensuales")
+    st.info("Módulo gráfico enlazado a SQL.")
