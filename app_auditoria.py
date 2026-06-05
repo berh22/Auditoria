@@ -91,27 +91,40 @@ if opcion == "📥 Alimentar / Capturar Cheques":
         empresa_carga = st.selectbox("¿A qué empresa corresponden estos cheques?", LISTA_EMPRESAS, key="emp_carga")
         
         if archivo_nuevo:
-            # 🔍 LEER TODO EL ARCHIVO CRUDO SIN ASUMIR COLUMNAS
             df_raw = pd.read_excel(archivo_nuevo, header=None)
             
             if df_raw.empty:
                 st.warning("⚠️ El archivo cargado parece estar vacío.")
             else:
-                # Algoritmo para cazar en qué fila vive el encabezado real
                 keywords = ["FOLIO", "BENEFICIARIO", "MONTO", "FECHA DE EMISIÓN", "CONCEPTO"]
                 header_idx = None
                 
                 for idx, row in df_raw.iterrows():
                     row_str = [str(cell).upper() for cell in row.values]
                     matches = sum(1 for kw in keywords if any(kw in cell for cell in row_str))
-                    if matches >= 2: # Si hace match con al menos 2 palabras clave, encontramos la fila
+                    if matches >= 2:
                         header_idx = idx
                         break
                 
                 if header_idx is not None:
-                    # Re-estructurar el dataframe partiendo desde la fila correcta
                     df_temp = df_raw.iloc[header_idx+1:].copy()
-                    df_temp.columns = [str(c).strip().upper() for c in df_raw.iloc[header_idx].values]
+                    
+                    # Generar lista inicial de encabezados en mayúsculas
+                    encabezados_crudos = [str(c).strip().upper() for c in df_raw.iloc[header_idx].values]
+                    
+                    # 🔥 REGLA ANTI-DUPLICADOS: Renombrar nombres idénticos (como los múltiples 'NAN' del final)
+                    encabezados_unicos = []
+                    conteos = {}
+                    for col in encabezados_crudos:
+                        if col in conteos:
+                            conteos[col] += 1
+                            encabezados_unicos.append(f"{col}_{conteos[col]}")
+                        else:
+                            conteos[col] = 0
+                            encabezados_unicos.append(col)
+                    
+                    # Asignar los nombres completamente únicos al DataFrame
+                    df_temp.columns = encabezados_unicos
                     
                     st.info(f"📋 ¡Formato de Chequera Detectado! Omitimos las filas de título del banco. Identificamos un bloque de datos para procesar.")
                     st.write("Vista previa de las primeras filas identificadas:")
@@ -142,7 +155,7 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                             if col_estandar not in df_temp.columns:
                                 df_temp[col_estandar] = np.nan if "FECHA" in col_estandar else ""
                         
-                        # FILTRO CRÍTICO: Quita las filas en blanco/vacías del final (donde no hay fecha de emisión)
+                        # Filtro para remover filas completamente en blanco del cierre de mes
                         df_temp = df_temp[df_temp["FECHA DE EMISIÓN"].notna() & (df_temp["FECHA DE EMISIÓN"].astype(str).str.strip() != "")]
                         
                         df_temp = limpiar_columna_monto(df_temp, 'MONTO')
