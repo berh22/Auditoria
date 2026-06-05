@@ -75,7 +75,7 @@ def cargar_desde_sql(supabase_client) -> pd.DataFrame:
         return pd.DataFrame(columns=list(DB_MAP.keys()))
 
 def guardar_en_sql(supabase_client, df_datos):
-    """Sincroniza datos regresando True si tuvo éxito o False si falló (Evita sobreescritura ciega)"""
+    """Sincroniza datos regresando True si tuvo éxito o False si falló con purificación JSON estricta"""
     if supabase_client is None: 
         st.error("⚠️ El cliente de conexión SQL no está listo.")
         return False
@@ -83,9 +83,8 @@ def guardar_en_sql(supabase_client, df_datos):
         return True
     try:
         df_sql = df_datos.rename(columns=DB_MAP)
-        df_sql = df_sql.replace({np.nan: None, pd.NaT: None, "": None})
         
-        # 🔥 BLINDAJE DE TIPOS CRÍTICOS ANTES DE ENVIAR A SQL
+        # Blidanje de tipos numéricos
         if "folio" in df_sql.columns:
             df_sql["folio"] = pd.to_numeric(df_sql["folio"], errors='coerce').fillna(0).astype(int)
         if "monto" in df_sql.columns:
@@ -96,7 +95,22 @@ def guardar_en_sql(supabase_client, df_datos):
             if col_f in df_sql.columns:
                 df_sql[col_f] = df_sql[col_f].apply(convertir_fecha_sql)
         
-        records = df_sql.to_dict(orient="records")
+        # Convertir a lista de diccionarios crudos
+        raw_records = df_sql.to_dict(orient="records")
+        
+        # 🛡️ PURIFICADOR ABSOLUTO ANTI-NAN (Garantiza cumplimiento JSON al 100%)
+        records = []
+        for row in raw_records:
+            clean_row = {}
+            for k, v in row.items():
+                # Si es un NaN matemático, un nulo o un texto vacío, se fuerza a un NULL (None) limpio para SQL
+                if pd.isna(v) or str(v).strip().upper() in ["NAN", "NONE", "<NAT>", ""]:
+                    clean_row[k] = None
+                else:
+                    clean_row[k] = v
+            records.append(clean_row)
+        
+        # Enviar el paquete completamente libre de NaNs a la nube
         supabase_client.table("cheques").upsert(records).execute()
         return True
     except Exception as e:
@@ -235,7 +249,6 @@ if opcion == "📥 Alimentar / Capturar Cheques":
             if st.button("💾 Sincronizar Cambios con la Base de Datos SQL"):
                 with st.spinner("Actualizando registros en el servidor..."):
                     df_final = forzar_mayusculas_y_limpieza(df_editado)
-                    # 🚀 CAMBIO: Si sale bien actualiza el estado y recarga, si no, se frena para ver el error
                     if guardar_en_sql(db_client, df_final):
                         st.session_state["MASTER_CHEQUES"] = df_final
                         st.success("¡Base de datos SQL actualizada correctamente!")
@@ -316,7 +329,6 @@ if opcion == "📥 Alimentar / Capturar Cheques":
                             
                             df_unificado = pd.concat([st.session_state["MASTER_CHEQUES"], df_temp], ignore_index=True).drop_duplicates(subset=["EMPRESA", "FOLIO"], keep="last")
                             
-                            # 🚀 CAMBIO: Detener recarga automática si Supabase rechaza los datos
                             if guardar_en_sql(db_client, df_unificado):
                                 st.session_state["MASTER_CHEQUES"] = df_unificado
                                 st.success("¡Datos absorbidos e integrados permanentemente en SQL!")
